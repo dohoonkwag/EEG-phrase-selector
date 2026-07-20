@@ -12,7 +12,7 @@ total_points = sample_rate * sweep_seconds
 try:
     ser = serial.Serial(arduino_port, baud_rate, timeout=0.1)
 except Exception as e:
-    print(f"Error: {e}.\nMake sure the Arduino IDE Serial Monitor or Plotter is completely closed!")
+    print(f"Error: {e}.\nMake sure the Arduino IDE Serial Monitor or Plotter is completely closed")
     exit()
 
 # Initialize a fixed array for the sweeping line
@@ -34,14 +34,15 @@ ax.get_xaxis().set_visible(False)
 ax.grid(True, color='#222222', linestyle='--')
 ax.tick_params(colors='white')
 
-print("Pipeline active! Put on the headset and watch the canvas sweep...")
+print("Put on the headset and watch the canvas sweep")
 
 write_index = 0
 
 try:
     while True:
         if ser.in_waiting:
-            raw_line = ser.readline().decode('utf-8', errors='ignore').strip()
+            # ser.readline() pulls bytes until it hits a newline character
+            raw_line = ser.readline().decode('utf-8', errors='ignore').strip() 
             if raw_line:
                 try:
                     val = int(raw_line)
@@ -71,6 +72,6 @@ try:
             fig.canvas.flush_events()
 
 except KeyboardInterrupt:
-    print("\nStream stopped gracefully.")
+    print("\nStream stopped.")
 finally:
     ser.close()
