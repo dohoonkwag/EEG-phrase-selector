@@ -16,6 +16,7 @@ WINDOW_SIZE = int(FS * WINDOW_SECONDS)
 CALIB_PHASE_DURATION = 15.0     # Duration (sec) for each training state
 
 # Bands & Filter
+ALPHA_BAND = (8.0, 12.0)
 BETA_BAND  = (13.0, 30.0)
 TOTAL_BAND = (2.0, 35.0)
 
@@ -82,9 +83,7 @@ def read_latest_samples():
                 continue
     return samples
 
-# ==========================================
-# PHASE 1: DUAL-STATE TRAINING
-# ==========================================
+
 def record_training_data(phase_name, duration_sec, cue_wav, default_fallback):
     global eeg_buffer
     
@@ -115,10 +114,11 @@ def record_training_data(phase_name, duration_sec, cue_wav, default_fallback):
                 clean_signal = lfilter(b_band, a_band, eeg_buffer)
                 freqs, psd = welch(clean_signal, fs=FS, nperseg=256, window='hann')
 
-                total_p = calculate_band_power(psd, freqs, TOTAL_BAND)
+                alpha_p = calculate_band_power(psd, freqs, ALPHA_BAND)
                 beta_p  = calculate_band_power(psd, freqs, BETA_BAND)
                 
-                log_ratio = np.log(beta_p) - np.log(total_p)
+                # Beta / Alpha Ratio suppresses relaxed Alpha waves
+                log_ratio = np.log(beta_p) - np.log(alpha_p)
                 if not np.isnan(log_ratio) and not np.isinf(log_ratio):
                     ratios.append(log_ratio)
 
@@ -137,39 +137,60 @@ def record_training_data(phase_name, duration_sec, cue_wav, default_fallback):
     mean_val = float(np.mean(ratios))
     return default_fallback if np.isnan(mean_val) else mean_val
 
-print("High Chime -> Mental Math [15s]")
-print("Low Chime  -> Relaxed Idle [15s]")
+print("High Chime -> Mental Math")
+print("Low Chime  -> Relaxed Idle")
 
 input("Press enter!")
 
-math_ratio_mean  = record_training_data("Active Math", CALIB_PHASE_DURATION, "cue_math.wav", default_fallback=-0.70)
+math_ratio_mean  = record_training_data("Active Math", CALIB_PHASE_DURATION, "cue_math.wav", default_fallback=0.20)
 time.sleep(3.0)
-relax_ratio_mean = record_training_data("Relaxed Idle", CALIB_PHASE_DURATION, "cue_relax.wav", default_fallback=-0.95)
+relax_ratio_mean = record_training_data("Relaxed Idle", CALIB_PHASE_DURATION, "cue_relax.wav", default_fallback=-0.40)
 
 CUSTOM_THRESHOLD = (math_ratio_mean + relax_ratio_mean) / 2.0
 
 
 print(f"Training complete!")
-print(f"Math Ratio Mean:  {math_ratio_mean:.4f}")
-print(f"Relax Ratio Mean: {relax_ratio_mean:.4f}")
+
+# Hysteresis Bounds (+/- 0.10 deadzone around threshold)
+HYSTERESIS_ON  = CUSTOM_THRESHOLD + 0.08
+HYSTERESIS_OFF = CUSTOM_THRESHOLD - 0.08
+
+print(f"Math Ratio Mean (Beta/Alpha):  {math_ratio_mean:.4f}")
+print(f"Relax Ratio Mean (Beta/Alpha): {relax_ratio_mean:.4f}")
 print(f"Calculated threshold: {CUSTOM_THRESHOLD:.4f}")
+print(f"Hysteresis Bounds: ON >= {HYSTERESIS_ON:.4f} | OFF <= {HYSTERESIS_OFF:.4f}")
 
 
 play_audio("cue_done.wav")
 time.sleep(1.0)
 
-# ==========================================
-# PHASE 2: REAL-TIME TESTING (Non-Blocking)
-# ==========================================
-median_buffer = [relax_ratio_mean] * 8
+
+
+median_buffer = [relax_ratio_mean] * 12
 smoothed_ratio = relax_ratio_mean
+is_concentrating = False
 last_focus_beep_time = 0
 sample_counter = 0
 
-print("TESTING MODEEEEEE")
+# Automatically detect if Math produces a higher or lower score than Relax
+math_is_higher = math_ratio_mean > relax_ratio_mean
+
+if math_is_higher:
+    if not is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
+        is_concentrating = True
+    elif is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
+        is_concentrating = False
+else:
+    # Inverse logic if Relax came out higher during training
+    if not is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
+        is_concentrating = True
+    elif is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
+        is_concentrating = False
+
+print("Real time testing started!")
 print("Close eyes. Do math to trigger the tone!\n")
 
-def draw_ascii_bar(val, thresh, min_v=-1.4, max_v=-0.3):
+def draw_ascii_bar(val, thresh, min_v=-1.0, max_v=1.0):
     norm_val = np.clip((val - min_v) / (max_v - min_v), 0, 1)
     norm_thr = np.clip((thresh - min_v) / (max_v - min_v), 0, 1)
     
@@ -199,38 +220,44 @@ try:
             if sample_counter % 32 == 0:
                 detrended = eeg_buffer - np.mean(eeg_buffer)
                 if np.ptp(detrended) > 1500:
-                    sys.stdout.write("\r [rejected because of artifact]                                ")
+                    sys.stdout.write("\r [rejected because of artifact]")
                     sys.stdout.flush()
                     continue
 
                 clean_signal = lfilter(b_band, a_band, eeg_buffer)
                 freqs, psd = welch(clean_signal, fs=FS, nperseg=256, window='hann')
 
-                total_p = calculate_band_power(psd, freqs, TOTAL_BAND)
+                alpha_p = calculate_band_power(psd, freqs, ALPHA_BAND)
                 beta_p  = calculate_band_power(psd, freqs, BETA_BAND)
                 
-                log_ratio = np.log(beta_p) - np.log(total_p)
+                log_ratio = np.log(beta_p) - np.log(alpha_p)
 
                 if np.isnan(log_ratio) or np.isinf(log_ratio):
                     continue
 
                 median_buffer.append(log_ratio)
-                if len(median_buffer) > 8:
+                if len(median_buffer) > 12:
                     median_buffer.pop(0)
                 med_val = np.median(median_buffer)
 
-                smoothed_ratio = (0.08 * med_val) + (0.92 * smoothed_ratio)
+                smoothed_ratio = (0.05 * med_val) + (0.95 * smoothed_ratio)
                 now = time.time()
+
+                # Hysteresis State Machine
+                if not is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
+                    is_concentrating = True
+                elif is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
+                    is_concentrating = False
 
                 meter_bar = draw_ascii_bar(smoothed_ratio, CUSTOM_THRESHOLD)
 
-                if smoothed_ratio >= CUSTOM_THRESHOLD:
-                    status_str = f"doing math!  [{meter_bar}] {smoothed_ratio:.2f}"
+                if is_concentrating:
+                    status_str = f"Doing math!  [{meter_bar}] {smoothed_ratio:.2f}"
                     if now - last_focus_beep_time >= 0.16:
                         play_focus_chunk()
                         last_focus_beep_time = now
                 else:
-                    status_str = f"relaxed! [{meter_bar}] {smoothed_ratio:.2f}"
+                    status_str = f"Relaxed! [{meter_bar}] {smoothed_ratio:.2f}"
 
                 sys.stdout.write(f"\r {status_str}   ")
                 sys.stdout.flush()
