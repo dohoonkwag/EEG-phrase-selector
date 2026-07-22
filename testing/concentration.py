@@ -21,12 +21,22 @@ BETA_BAND  = (13.0, 30.0)
 TOTAL_BAND = (2.0, 35.0)
 
 nyq = 0.5 * FS
-b_band, a_band = butter(2, [2.0 / nyq, 35.0 / nyq], btype='band')
+# trying a highpass at 7 Hz to try and get rid of effects of breathing
+b_band, a_band = butter(2, [7.0 / nyq, 35.0 / nyq], btype='band')
 
 def generate_tone_wav(filename, freq_hz, duration_sec, volume=0.18):
     sample_rate = 44100
     t = np.linspace(0, duration_sec, int(sample_rate * duration_sec), False)
     tone = np.sin(2 * np.pi * freq_hz * t) * volume
+    
+    # trying to eliminate speaker crackle/pops :(
+    fade_samples = int(sample_rate * 0.005)
+    fade_in = np.linspace(0, 1, fade_samples)
+    fade_out = np.linspace(1, 0, fade_samples)
+    
+    tone[:fade_samples] *= fade_in
+    tone[-fade_samples:] *= fade_out
+    
     audio_data = (tone * 32767).astype(np.int16)
     
     import wave
@@ -39,7 +49,7 @@ def generate_tone_wav(filename, freq_hz, duration_sec, volume=0.18):
 generate_tone_wav("cue_math.wav", freq_hz=1000, duration_sec=0.40)
 generate_tone_wav("cue_relax.wav", freq_hz=450, duration_sec=0.40)
 generate_tone_wav("cue_done.wav", freq_hz=1200, duration_sec=0.50)
-generate_tone_wav("focus_loop_chunk.wav", freq_hz=880, duration_sec=0.18, volume=0.15)
+generate_tone_wav("focus_loop_chunk.wav", freq_hz=880, duration_sec=0.10, volume=0.15)
 
 def play_audio(filename):
     os.system(f"afplay {filename} &")
@@ -57,7 +67,13 @@ except Exception as e:
 
 def calculate_band_power(psd, freqs, band):
     idx = np.logical_and(freqs >= band[0], freqs <= band[1])
-    return np.sum(psd[idx]) + 1e-10
+    if not np.any(idx):
+        return 1e-10
+    
+    trapz_fn = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+    power = trapz_fn(psd[idx], freqs[idx])
+    
+    return max(power, 1e-10)
 
 eeg_buffer = np.zeros(WINDOW_SIZE)
 serial_data_buffer = ""
@@ -249,7 +265,7 @@ try:
 
                 if is_concentrating:
                     status_str = f"Doing math!  [{meter_bar}] {smoothed_ratio:.2f}"
-                    if now - last_focus_beep_time >= 0.16:
+                    if now - last_focus_beep_time >= 0.10:
                         play_focus_chunk()
                         last_focus_beep_time = now
                 else:
