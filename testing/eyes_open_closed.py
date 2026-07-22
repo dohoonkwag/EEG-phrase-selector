@@ -17,3 +17,208 @@ power spike while the eyes sit completely motionless behind closed lids,
 I believe this is still a pure neuro-electrical oscillation rather 
 than an eye movement artifact.
 """
+import serial
+import time
+import subprocess
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import butter, lfilter, welch
+
+PORT = '/dev/cu.usbmodem1101'
+BAUD = 115200
+
+FS = 512 
+WIN_SEC = 2.0 
+WIN_SIZE = int(FS * WIN_SEC)
+DURATION = 15.0
+
+# Frequency band definitions (Hz)
+DELTA = (0.5, 3.5)
+THETA = (4.0, 7.5)
+ALPHA = (8.0, 12.5)
+BETA  = (13.0, 30.0)
+TOTAL = (2.0, 35.0)
+
+nyq = 0.5 * FS
+b_band, a_band = butter(2, [2.0 / nyq, 35.0 / nyq], btype='band')
+
+def make_cue(filename, freq_hz, duration_sec=0.4, volume=0.2):
+    sr = 44100
+    t = np.linspace(0, duration_sec, int(sr * duration_sec), False)
+    tone = np.sin(2 * np.pi * freq_hz * t) * volume
+    
+    fade = int(sr * 0.005)
+    tone[:fade] *= np.linspace(0, 1, fade)
+    tone[-fade:] *= np.linspace(1, 0, fade)
+    
+    import wave
+    with wave.open(filename, 'w') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes((tone * 32767).astype(np.int16).tobytes())
+
+make_cue("start_beep.wav", 880, 0.4)
+make_cue("stop_beep.wav", 440, 0.5)
+
+def play_sound(filename):
+    subprocess.Popen(["afplay", filename])
+
+try:
+    ser = serial.Serial(PORT, BAUD, timeout=0.05)
+    ser.reset_input_buffer()
+    print(f"Connected to {PORT}")
+except Exception as err:
+    print(f"Connection failed: {err}")
+    exit()
+
+def get_raw_samples():
+    samples = []
+    if ser.in_waiting > 0:
+        raw_chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+        for line in raw_chunk.split('\n'):
+            line = line.strip()
+            if "RAW:" in line:
+                line = line.split("RAW:")[1].strip()
+            try:
+                samples.append(int(line))
+            except ValueError:
+                continue
+    return samples
+
+def band_power(psd, freqs, band):
+    idx = np.logical_and(freqs >= band[0], freqs <= band[1])
+    if not np.any(idx):
+        return 1e-10
+    trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+    return max(trapz(psd[idx], freqs[idx]), 1e-10)
+
+def run_trial(label, duration, audio_cue=True):
+    print(f"\nCondition: {label} ---")
+    for i in range(3, 0, -1):
+        print(f"Starting in {i}s", end='\r')
+        time.sleep(1.0)
+    
+    if audio_cue:
+        play_sound("start_beep.wav")
+
+    print(f"\nRecording {label} ({duration}s)...")
+    
+    buf = np.zeros(WIN_SIZE)
+    raw_history = []
+    ratios = []
+    psds = []
+    
+    t0 = time.time()
+    counter = 0
+    
+    while time.time() - t0 < duration:
+        new_pts = get_raw_samples()
+        for sample in new_pts:
+            buf = np.roll(buf, -1)
+            buf[-1] = sample
+            raw_history.append(sample)
+            counter += 1
+            
+            # Run PSD every 32 new samples
+            if counter % 32 == 0 and len(raw_history) >= WIN_SIZE:
+                detrend = buf - np.mean(buf)
+                filt = lfilter(b_band, a_band, detrend)
+                
+                # Drop severe motion artifacts
+                if np.ptp(filt) > 600:
+                    continue
+
+                freqs, psd = welch(filt, fs=FS, nperseg=512, window='hann')
+                
+                a_pwr = band_power(psd, freqs, ALPHA)
+                tot_pwr = band_power(psd, freqs, TOTAL)
+                
+                ratio = a_pwr / tot_pwr
+                ratios.append(ratio)
+                psds.append(psd)
+                
+                t_remaining = max(0.0, duration - (time.time() - t0))
+                print(f"Time left: {t_remaining:.1f}s | Windows: {len(ratios)}", end='\r')
+        
+        time.sleep(0.005)
+        
+    play_sound("stop_beep.wav")
+    print(f"\nFinished {label} recording.")
+    return np.array(raw_history), freqs, np.mean(psds, axis=0), np.array(ratios)
+
+# Experiment Execution
+
+input("Press enter for eyes open")
+raw_open, freqs, psd_open, ratios_open = run_trial("Eyes Open", DURATION, audio_cue=False)
+
+print("Phase 2: Eyes Closed")
+input("Press enter for eyes closed")
+
+raw_closed, _, psd_closed, ratios_closed = run_trial("Eyes Closed", DURATION, audio_cue=True)
+
+ser.close()
+
+# Plotting
+
+plt.style.use('dark_background')
+fig, axs = plt.subplots(2, 2, figsize=(13, 8))
+fig.canvas.manager.set_window_title('FP1 Eyes Open vs Eyes Closed Analysis')
+
+# PSD Comparison
+axs[0, 0].plot(freqs, psd_open, color='#00e5ff', label='Eyes Open', lw=1.5)
+axs[0, 0].plot(freqs, psd_closed, color='#00ff66', label='Eyes Closed', lw=1.5)
+axs[0, 0].set_xlim(2, 32)
+axs[0, 0].axvspan(8, 12.5, color='#00ff66', alpha=0.15, label='Alpha (8-12.5Hz)')
+axs[0, 0].set_title('Power Spectral Density')
+axs[0, 0].set_xlabel('Frequency (Hz)')
+axs[0, 0].set_ylabel('uV^2 / Hz')
+axs[0, 0].legend(loc='upper right')
+axs[0, 0].grid(True, alpha=0.2)
+
+# Alpha Ratio Time Series
+axs[0, 1].plot(ratios_open, color='#00e5ff', label='Eyes Open', alpha=0.8)
+axs[0, 1].plot(ratios_closed, color='#00ff66', label='Eyes Closed', alpha=0.8)
+axs[0, 1].axhline(np.mean(ratios_open), color='#00e5ff', linestyle='--', label=f'Open Mean ({np.mean(ratios_open):.3f})')
+axs[0, 1].axhline(np.mean(ratios_closed), color='#00ff66', linestyle='--', label=f'Closed Mean ({np.mean(ratios_closed):.3f})')
+axs[0, 1].set_title('Alpha / Total Power Ratio')
+axs[0, 1].set_xlabel('Window Index')
+axs[0, 1].set_ylabel('Ratio')
+axs[0, 1].legend(loc='upper right')
+axs[0, 1].grid(True, alpha=0.2)
+
+# Band Breakdown
+def get_all_bands(psd, freqs):
+    return [
+        band_power(psd, freqs, DELTA),
+        band_power(psd, freqs, THETA),
+        band_power(psd, freqs, ALPHA),
+        band_power(psd, freqs, BETA)
+    ]
+
+open_bands = get_all_bands(psd_open, freqs)
+closed_bands = get_all_bands(psd_closed, freqs)
+labels = ['Delta', 'Theta', 'Alpha', 'Beta']
+
+x = np.arange(len(labels))
+w = 0.35
+axs[1, 0].bar(x - w/2, open_bands, w, label='Eyes Open', color='#00e5ff')
+axs[1, 0].bar(x + w/2, closed_bands, w, label='Eyes Closed', color='#00ff66')
+axs[1, 0].set_xticks(x)
+axs[1, 0].set_xticklabels(labels)
+axs[1, 0].set_title('Band Power Comparison')
+axs[1, 0].set_ylabel('Power (uV^2)')
+axs[1, 0].legend(loc='upper right')
+axs[1, 0].grid(True, alpha=0.2)
+
+# Ratio Distribution Histogram
+axs[1, 1].hist(ratios_open, bins=20, color='#00e5ff', alpha=0.5, label='Eyes Open')
+axs[1, 1].hist(ratios_closed, bins=20, color='#00ff66', alpha=0.5, label='Eyes Closed')
+axs[1, 1].set_title('Ratio Distribution')
+axs[1, 1].set_xlabel('Alpha Ratio')
+axs[1, 1].set_ylabel('Count')
+axs[1, 1].legend(loc='upper right')
+axs[1, 1].grid(True, alpha=0.2)
+
+plt.tight_layout()
+plt.show()
