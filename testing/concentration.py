@@ -151,7 +151,7 @@ CUSTOM_THRESHOLD = (math_ratio_mean + relax_ratio_mean) / 2.0
 
 print(f"Training complete!")
 
-# Hysteresis Bounds (+/- 0.10 deadzone around threshold)
+# Hysteresis Bounds (+/- 0.08 deadzone around threshold)
 HYSTERESIS_ON  = CUSTOM_THRESHOLD + 0.08
 HYSTERESIS_OFF = CUSTOM_THRESHOLD - 0.08
 
@@ -165,7 +165,6 @@ play_audio("cue_done.wav")
 time.sleep(1.0)
 
 
-
 median_buffer = [relax_ratio_mean] * 12
 smoothed_ratio = relax_ratio_mean
 is_concentrating = False
@@ -175,22 +174,13 @@ sample_counter = 0
 # Automatically detect if Math produces a higher or lower score than Relax
 math_is_higher = math_ratio_mean > relax_ratio_mean
 
-if math_is_higher:
-    if not is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
-        is_concentrating = True
-    elif is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
-        is_concentrating = False
-else:
-    # Inverse logic if Relax came out higher during training
-    if not is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
-        is_concentrating = True
-    elif is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
-        is_concentrating = False
-
 print("Real time testing started!")
 print("Close eyes. Do math to trigger the tone!\n")
 
-def draw_ascii_bar(val, thresh, min_v=-1.0, max_v=1.0):
+def draw_ascii_bar(val, thresh, math_m, relax_m):
+    min_v = min(math_m, relax_m) - 0.3
+    max_v = max(math_m, relax_m) + 0.3
+    
     norm_val = np.clip((val - min_v) / (max_v - min_v), 0, 1)
     norm_thr = np.clip((thresh - min_v) / (max_v - min_v), 0, 1)
     
@@ -243,13 +233,19 @@ try:
                 smoothed_ratio = (0.05 * med_val) + (0.95 * smoothed_ratio)
                 now = time.time()
 
-                # Hysteresis State Machine
-                if not is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
-                    is_concentrating = True
-                elif is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
-                    is_concentrating = False
+                # Dynamic Hysteresis State Machine (Respects Directionality)
+                if math_is_higher:
+                    if not is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
+                        is_concentrating = True
+                    elif is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
+                        is_concentrating = False
+                else:
+                    if not is_concentrating and smoothed_ratio <= HYSTERESIS_OFF:
+                        is_concentrating = True
+                    elif is_concentrating and smoothed_ratio >= HYSTERESIS_ON:
+                        is_concentrating = False
 
-                meter_bar = draw_ascii_bar(smoothed_ratio, CUSTOM_THRESHOLD)
+                meter_bar = draw_ascii_bar(smoothed_ratio, CUSTOM_THRESHOLD, math_ratio_mean, relax_ratio_mean)
 
                 if is_concentrating:
                     status_str = f"Doing math!  [{meter_bar}] {smoothed_ratio:.2f}"
