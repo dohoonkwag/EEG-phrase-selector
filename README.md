@@ -5,7 +5,7 @@ A bilingual assistive communication system that translates electrooculography (E
 This project was built to demonstrate how blinks can be decoded in real-time to drive a hands-free user interface without relying on proprietary black-box metrics.
 
 
-## 🛠️ System Architecture & Hardware Bridge
+## System Architecture & Hardware Bridge
 
 Connecting to the **NeuroSky MindWave Mobile 2** was a significant hurdle because the device lacks recent developer support. 
 
@@ -35,7 +35,7 @@ Connecting to the **NeuroSky MindWave Mobile 2** was a significant hurdle becaus
 
 ---
 
-## 🎮 Hands-Free Navigation & State Machine
+## Hands-Free Navigation & State Machine
 * **Double Blink ($\text{Count} = 2$):** Advances the highlighted menu index down by 1 option. Confirmed by a $600\text{ Hz}$ scroll chime.
 * **4-Blink Sequence ($\text{Count} = 4$):** Selects the active phrase. Confirmed by a $900\text{ Hz}$ selection chime, triggering TTS output.
 * **Invalid Count ($1, 3, \text{or } 5+$):** Discarded on pattern timeout. Confirmed with a low $300\text{ Hz}$ discard tone.
